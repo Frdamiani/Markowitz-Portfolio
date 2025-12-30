@@ -1,4 +1,3 @@
-import yfinance as yf
 import numpy as np
 liste =[]
 auto=str(input("veut tu un portefeuille fait automatiquement oui/non ?"))
@@ -20,12 +19,23 @@ jours =int(input("combien de jours dans l'année ? (marché ouvert)"))
 moyenne_jour = logrendjour.mean()
 cov_jour = logrendjour.cov()
 
-mu_annual = moyenne_jour * jours
-cov_annual = cov_jour * jours
-total = []
+mu_annuel = moyenne_jour * jours
+cov_annuel = cov_jour * jours
+ponde = []
+somme = 0
 while somme !=100:
     for i in range(len(liste)):
-        x=int(input(f"choisi la pondération de : {liste[i]}"))
-        total.append(x)
-        print(sum(total))
-    somme=sum(total)
+        x=int(input(f"choisi la pondération de : {liste[i]} (nombre entier, en %) "))
+        ponde.append(x)
+        somme = sum(ponde)
+        print (somme)
+ponde= np.array(ponde)/100
+rend_porte = float(ponde @ mu_annuel)
+tsr = 0.02
+var_porte = float(ponde.T @ cov_annuel @ ponde)
+vol_porte = np.sqrt(var_porte)
+sharpe = (rend_porte - tsr) / vol_porte
+print("Performance du portefeuille")
+print(f"\nRendement annuel attendu : {rend_porte:.2%}")
+print(f"Volatilité annuelle : {vol_porte:.2%}")
+print(f"Ratio de Sharpe : {sharpe:.2f}")
