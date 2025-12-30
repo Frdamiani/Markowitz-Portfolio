@@ -1,10 +1,31 @@
-  import yfinance as yf
+import yfinance as yf
+import numpy as np
 liste =[]
 auto=str(input("veut tu un portefeuille fait automatiquement oui/non ?"))
 if auto =="oui" :
-    liste =["AAPL","MSFT","AMZN","GOOGL","META","JNJ","JPM","XOM","PG","NVDA"]
+    liste =["AAPL","GOOGL","META","XOM","PG","NVDA"]
 else :
-    nombre=int(input("combien d'actions souhaite tu dans portefeuille ?"))
+    nombre=int(input("combien d'actions souhaites tu dans portefeuille ?"))
     for i in range (nombre):
-        ticker=str(input("AAPL,MSFT,AMZN,GOOGL,META,JNJ,JPM,XOM,PG,NVDA"))
+        ticker=str(input("Ex : AAPL,MSFT,AMZN,GOOGL,META,JNJ,JPM,XOM,PG,NVDA"))
         liste.append(ticker)
+
+prices = yf.download(liste, start="2019-01-01", auto_adjust=True)
+close = prices["Close"]
+
+logrendjour = np.log(close / close.shift(1))
+logrendjour = logrendjour.dropna()
+jours =int(input("combien de jours dans l'année ? (marché ouvert)"))
+
+moyenne_jour = logrendjour.mean()
+cov_jour = logrendjour.cov()
+
+mu_annual = moyenne_jour * jours
+cov_annual = cov_jour * jours
+total = []
+while somme !=100:
+    for i in range(len(liste)):
+        x=int(input(f"choisi la pondération de : {liste[i]}"))
+        total.append(x)
+        print(sum(total))
+    somme=sum(total)
