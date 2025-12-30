@@ -1,0 +1,10 @@
+  import yfinance as yf
+liste =[]
+auto=str(input("veut tu un portefeuille fait automatiquement oui/non ?"))
+if auto =="oui" :
+    liste =["AAPL","MSFT","AMZN","GOOGL","META","JNJ","JPM","XOM","PG","NVDA"]
+else :
+    nombre=int(input("combien d'actions souhaite tu dans portefeuille ?"))
+    for i in range (nombre):
+        ticker=str(input("AAPL,MSFT,AMZN,GOOGL,META,JNJ,JPM,XOM,PG,NVDA"))
+        liste.append(ticker)
