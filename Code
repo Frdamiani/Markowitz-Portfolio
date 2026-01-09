@@ -1,3 +1,27 @@
+# Portefeuille Markowitz
+
+## Anthony Vallée — François Damiani  
+## TD 5
+
+## Descriptif du projet
+
+##L’objectif de ce projet est de construire et d’évaluer un portefeuille d’actions à partir de données de
+##marché récupérées via Yahoo Finance.  
+##À partir des cours de clôture ajustés, nous calculons les rendements logarithmiques journaliers, puis la moyenne
+##et la matrice de covariance des rendements.
+
+#Ces estimations sont ensuite annualisées afin d’obtenir une approximation du rendement annuel attendu et 
+#de la volatilité annuelle du portefeuille.  
+#Enfin, nous calculons le ratio de Sharpe à partir d’un taux sans risque fixé à 3%.
+
+#Le notebook affiche également un résumé du portefeuille sous forme de tableau, un graphique d’évolution de la valeur
+#du portefeuille (base 100) et exporte les résultats en CSV et en PNG.
+
+## Explication des fonctions
+
+#- `chox()` : permet de constituer la liste d’actions du portefeuille (sélection automatique ou saisie manuelle).
+#- `wgt(lst)` : récupère les pondérations (en %) pour chaque action et impose que la somme soit exactement égale à 100%.
+
 # Importation des bibliothèques nécéssaires
 import yfinance as yf
 import numpy as np
