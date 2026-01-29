@@ -1,169 +1,173 @@
-# Portefeuille Markowitz
+# Portefeuille de Markowitz
+# Anthony Vallée — François Damiani
+# TD 5
 
-## Anthony Vallée — François Damiani  
-## TD 5
-
-## Descriptif du projet
-
-##L’objectif de ce projet est de construire et d’évaluer un portefeuille d’actions à partir de données de
-##marché récupérées via Yahoo Finance.  
-##À partir des cours de clôture ajustés, nous calculons les rendements logarithmiques journaliers, puis la moyenne
-##et la matrice de covariance des rendements.
-
-#Ces estimations sont ensuite annualisées afin d’obtenir une approximation du rendement annuel attendu et 
-#de la volatilité annuelle du portefeuille.  
-#Enfin, nous calculons le ratio de Sharpe à partir d’un taux sans risque fixé à 3%.
-
-#Le notebook affiche également un résumé du portefeuille sous forme de tableau, un graphique d’évolution de la valeur
-#du portefeuille (base 100) et exporte les résultats en CSV et en PNG.
-
-## Explication des fonctions
-
-#- `chox()` : permet de constituer la liste d’actions du portefeuille (sélection automatique ou saisie manuelle).
-#- `wgt(lst)` : récupère les pondérations (en %) pour chaque action et impose que la somme soit exactement égale à 100%.
-
-# Importation des bibliothèques nécéssaires
+# Import des librairies
 import yfinance as yf
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from scipy.optimize import minimize
 
 
-# =========================
 # Fonctions
-# =========================
 
-def chox():
-    # Choix automatique ou manuel du portefeuil
-    lst = []
-    auto = str(input("Souhaites tu une sélection automatique d'actions ? oui/non ?")).strip().lower()
+def choose_assets():
+    # Choix des actions
+    assets=[]
+    auto=input("Sélection automatique ? (oui/non) : ").strip().lower()
 
-    if auto == "oui":
-        lst = ["AAPL", "GOOGL", "META", "XOM", "PG", "NVDA"]
+    if auto=="oui":
+        assets=["AAPL","GOOGL","META","XOM","PG","NVDA"]
     else:
-        nb = int(input("Combien d'actions souhaites-tu dans ton portefeuille ?"))
+        n=int(input("Nombre d'actions : "))
+        for i in range(n):
+            ticker=input("Action (ex : AAPL, MSFT, AMZN, GOOGL, META, XOM, PG, NVDA) : ").strip().upper()
+            assets.append(ticker)
 
-        for i in range(nb):
-            print("choisis dans la liste ci dessous les actionss que tu souhaites posséder")
-            tkr = str(input(
-                "Ex : AAPL, MSFT, AMZN, GOOGL, META, JNJ, JPM, XOM, PG, NVDA : "
-            )).strip().upper()
-            lst.append(tkr)
-
-    return lst
+    return assets
 
 
-def wgt(lst):
-    # Pondérations avec contraite somme = 100
-    sm = 0
-    while sm != 100:
-        pond = []
-        sm = 0
-        print("Quel POURCENTAGE de ton portefeuil veux-tu investir sur chaque action ?")
-        print("La somme totale DOIT faire exactement 100%.\n")
+def set_weights(assets):
+    # Pondérations manuelles
+    total=0
+    while total!=100:
+        weights=[]
+        total=0
+        print("\nLa somme doit être égale à 100 %\n")
 
-        for tkr in lst:
-            x = float(input(f" - {tkr} : ").replace(",", "."))
-            pond.append(x)
-            sm = sum(pond)
-            rst = len(lst) - len(pond)
-            print(f"Portefeuille rempli à {sm}%. Actions restantes : {rst}\n")
+        for t in assets:
+            w=float(input(f"{t} : ").replace(",","."))
+            weights.append(w)
+            total=sum(weights)
+            print(f"Total actuel : {total} %")
 
-        if sm != 100:
-            print(f"Erreur : la somme des pondérations est {sm}%. Elle doit être égale à 100%.\n")
+        if total!=100:
+            print("Erreur de pondération\n")
 
-    return np.array(pond) / 100
+    return np.array(weights)/100
 
 
-# =========================
+def optimize_weights(mean_ret,cov_mat,rf=0.03,method="sharpe",target_ret=None,long_only=True):
+    # Optimisation Markowitz
+    n=len(mean_ret)
+    mean_ret=np.asarray(mean_ret)
+    cov_mat=np.asarray(cov_mat)
+
+    def port_ret(w):
+        return float(w@mean_ret)
+
+    def port_var(w):
+        return float(w.T@cov_mat@w)
+
+    def port_vol(w):
+        return np.sqrt(port_var(w))
+
+    if method=="sharpe":
+        def obj(w):
+            return -(port_ret(w)-rf)/port_vol(w)
+    elif method=="min_var":
+        def obj(w):
+            return port_var(w)
+    elif method=="target":
+        def obj(w):
+            return port_var(w)
+    else:
+        raise ValueError("Méthode invalide")
+
+    constraints=[{"type":"eq","fun":lambda w:np.sum(w)-1}]
+
+    if method=="target":
+        constraints.append({"type":"eq","fun":lambda w:port_ret(w)-target_ret})
+
+    bounds=[(0,1)]*n if long_only else [(-1,1)]*n
+    w0=np.ones(n)/n
+
+    res=minimize(obj,w0,method="SLSQP",bounds=bounds,constraints=constraints)
+
+    if not res.success:
+        raise RuntimeError("Optimisation échouée")
+
+    w=res.x
+    w[np.abs(w)<1e-8]=0
+    return w/np.sum(w)
+
+
 # Programme principal
-# =========================
 
-# Choix des actions
-lst = chox()
+assets=choose_assets()
 
-# Téléchargement des prix ajustés depuis 2019 afin d'estimer les rendements
-px = yf.download(lst, start="2019-01-01", auto_adjust=True, progress=False)
-cls = px["Close"]
+# Prix historiques
+prices=yf.download(assets,start="2019-01-01",auto_adjust=True,progress=False)["Close"]
 
-# Rendements logarithmiques journaliers
-rdt_j = np.log(cls / cls.shift(1))
-rdt_j = rdt_j.dropna()
+# Rendements log journaliers
+returns_daily=np.log(prices/prices.shift(1)).dropna()
 
-# Nombre de jours de trading sur 2025
-px25 = yf.download(lst, start="2025-01-01", end="2026-01-01",
-                   auto_adjust=True, progress=False)
-cls25 = px25["Close"]
-nbj = int(cls25.dropna().shape[0])
+# Jours de cotation 2025
+prices_25=yf.download(assets,start="2025-01-01",end="2026-01-01",auto_adjust=True,progress=False)["Close"]
+n_days=len(prices_25.dropna())
 
-# Moyenne et covariance journalières
-moy_j = rdt_j.mean()
-cov_j = rdt_j.cov()
+# Moyennes et covariance
+mean_daily=returns_daily.mean()
+cov_daily=returns_daily.cov()
 
-# Annualisation des données
-mu_a = moy_j * nbj
-cov_a = cov_j * nbj
+# Annualisation
+mean_annual=mean_daily*n_days
+cov_annual=cov_daily*n_days
 
-# Pondérations
-pond = wgt(lst)
+# Choix des pondérations
+mode=input("\nManuel ou optimisation ? (manuel/opti) : ").strip().lower()
 
-# Rendement annuel espéré du portefeuil
-rdt_ptf = float(pond @ mu_a)
-tsr = 0.03  # Taux sans rique approximatif
+if mode=="opti":
+    print("Méthodes : sharpe / min_var / target")
+    method=input("Choix : ").strip().lower()
+    rf=0.03
 
-# Variance et volatilité annuelle
-var_ptf = float(pond.T @ cov_a @ pond)
-vol_ptf = np.sqrt(var_ptf)
+    if method=="target":
+        target=float(input("Rendement cible (ex : 0.10) : ").replace(",","."))
+        weights=optimize_weights(mean_annual,cov_annual,rf,method,target)
+    else:
+        weights=optimize_weights(mean_annual,cov_annual,rf,method)
+else:
+    weights=set_weights(assets)
 
-# Ratio de Sharpe
-sh = (rdt_ptf - tsr) / vol_ptf
+# Performances
+port_return=float(weights@mean_annual)
+port_var=float(weights.T@cov_annual@weights)
+port_vol=np.sqrt(port_var)
+sharpe=(port_return-rf)/port_vol
 
-# Affichage des resultats
-print("\nPerformance du portefeuille :")
-print(f"Le rendement annuel attendu est : {rdt_ptf:.2%}")
-print(f"La volatilité annuelle est de : {vol_ptf:.2%}")
-print(f"Le ratio de Sharpe est : {sh:.2f}")
+print("\nRésultats")
+print(f"Rendement annuel : {port_return:.2%}")
+print(f"Volatilité : {port_vol:.2%}")
+print(f"Sharpe : {sharpe:.2f}")
 
-# =========================
-# Sortie + graphique
-# =========================
+# Résumé
+summary=pd.DataFrame({"actions":assets,"weight_%":np.round(weights*100,2),"return_%":np.round(mean_annual.values*100,2)})
 
-df = pd.DataFrame({
-    "actions": lst,
-    "pond_%": np.round(pond * 100, 2),
-    "rdt_annuel_%": np.round(mu_a.values * 100, 2)
-})
+print("\nPortefeuille")
+print(summary.to_string(index=False))
 
-print("\nRésumé des actions :")
-print(df.to_string(index=False))
-
-# Valeur du portefeuille (base 100)
-base = 100
-ptf = (cls / cls.iloc[0]).mul(pond, axis=1).sum(axis=1) * base
+# Valeur du portefeuille base 100
+base=100
+portfolio=(prices/prices.iloc[0]).mul(weights,axis=1).sum(axis=1)*base
 
 plt.figure()
-plt.plot(ptf.index, ptf.values)
+plt.plot(portfolio.index,portfolio.values)
 plt.title("Évolution du portefeuille (base 100)")
 plt.xlabel("Date")
 plt.ylabel("Valeur")
 plt.tight_layout()
 plt.show()
 
-# =========================
-# Export CSV + figure
-# =========================
-
-df.to_csv("resume_portefeuille.csv", index=False)
+# Exports
+summary.to_csv("resume_portefeuille.csv",index=False)
 
 plt.figure()
-plt.plot(ptf.index, ptf.values)
+plt.plot(portfolio.index,portfolio.values)
 plt.title("Évolution du portefeuille (base 100)")
 plt.xlabel("Date")
 plt.ylabel("Valeur")
 plt.tight_layout()
-plt.savefig("evolution_portefeuille.png", dpi=150)
+plt.savefig("evolution_portefeuille.png",dpi=150)
 plt.close()
-
-print("\nExport effectué :")
-print(" - resume_portefeuille.csv")
-print(" - evolution_portefeuille.png")
