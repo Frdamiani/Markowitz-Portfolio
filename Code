@@ -1,0 +1,590 @@
+import dash
+from dash import dcc, html, Input, Output, State
+import plotly.graph_objects as go
+import plotly.express as px
+import pandas as pd
+import numpy as np
+import yfinance as yf
+from scipy.optimize import minimize
+from datetime import datetime, timedelta
+from io import StringIO
+import warnings
+warnings.filterwarnings("ignore")
+
+tickers = ["SPY", "QQQ", "TLT", "GLD", "IEF"]
+
+noms = {
+    "SPY": "S&P 500",
+    "QQQ": "NASDAQ 100",
+    "TLT": "Oblig LT US",
+    "GLD": "Or",
+    "IEF": "Oblig MT US",
+}
+
+rf = 0.045  # taux sans risque
+
+# couleurs
+bg = "#0f1117"
+card = "#1a1d27"
+blue = "#4f8ef7"
+green = "#00c48c"
+red = "#ff4d6d"
+yellow = "#ffd166"
+txt = "#e0e0e0"
+gray = "#6b7280"
+
+
+def get_returns(ticks, years=3):
+    start = datetime.today() - timedelta(days=365 * years)
+    raw = yf.download(ticks, start=start, auto_adjust=True, progress=False)["Close"]
+    # yfinance balance un MultiIndex selon les versions, on aplatit
+    if isinstance(raw.columns, pd.MultiIndex):
+        raw.columns = raw.columns.get_level_values(0)
+    raw = raw[ticks]
+    ret = raw.pct_change().dropna()
+    return ret
+
+
+def max_sharpe(ret):
+    mu = ret.mean() * 252
+    cov = ret.cov() * 252
+    n = len(ret.columns)
+
+    def neg_sharpe(w):
+        r = np.dot(w, mu)
+        v = np.sqrt(w @ cov.values @ w)
+        return -(r - rf) / v
+
+    res = minimize(
+        neg_sharpe,
+        np.ones(n) / n,
+        method="SLSQP",
+        bounds=[(0, 1)] * n,
+        constraints=[{"type": "eq", "fun": lambda w: w.sum() - 1}]
+    )
+    w = np.clip(res.x, 0, 1)
+    w /= w.sum()
+    return dict(zip(ret.columns, w))
+
+
+def min_vol(ret):
+    cov = ret.cov() * 252
+    n = len(ret.columns)
+
+    def vol(w):
+        return np.sqrt(w @ cov.values @ w)
+
+    res = minimize(
+        vol,
+        np.ones(n) / n,
+        method="SLSQP",
+        bounds=[(0, 1)] * n,
+        constraints=[{"type": "eq", "fun": lambda w: w.sum() - 1}]
+    )
+    w = np.clip(res.x, 0, 1)
+    w /= w.sum()
+    return dict(zip(ret.columns, w))
+
+
+def get_metrics(weights, ret):
+    ticks = list(weights.keys())
+    w = np.array([weights[k] for k in ticks])
+    mu = ret[ticks].mean() * 252
+    cov = ret[ticks].cov() * 252
+    r = float(np.dot(w, mu))
+    v = float(np.sqrt(w @ cov.values @ w))
+    sharpe = (r - rf) / v
+    return r, v, sharpe
+
+
+def efficient_frontier(ret, nb_pts=150):
+    mu = ret.mean() * 252
+    cov = ret.cov() * 252
+    n = len(ret.columns)
+    targets = np.linspace(mu.min(), mu.max(), nb_pts)
+    vols, rets = [], []
+    for c in targets:
+        res = minimize(
+            lambda w: np.sqrt(w @ cov.values @ w),
+            np.ones(n) / n,
+            method="SLSQP",
+            bounds=[(0, 1)] * n,
+            constraints=[
+                {"type": "eq", "fun": lambda w: w.sum() - 1},
+                {"type": "eq", "fun": lambda w, c=c: np.dot(w, mu) - c}
+            ]
+        )
+        if res.success:
+            vols.append(res.fun * 100)
+            rets.append(c * 100)
+    return vols, rets
+
+
+def read_json(json_str):
+    # pd.read_json veut un StringIO en pandas 2.x, pas une string brute
+    df = pd.read_json(StringIO(json_str))
+    df.index = pd.to_datetime(df.index, unit="ms")
+    df = df.sort_index()
+    return df
+
+
+def get_real_weights(ids, vals, opt_weights):
+    w = {}
+    for i, d in enumerate(ids):
+        t = d["ticker"]
+        try:
+            v = float(vals[i]) / 100 if vals[i] is not None else opt_weights.get(t, 0)
+        except Exception:
+            v = opt_weights.get(t, 0)
+        w[t] = v
+    total = sum(w.values())
+    if total > 0:
+        w = {t: v / total for t, v in w.items()}
+    return w
+
+
+def make_card(title, content):
+    return html.Div(
+        style={
+            "backgroundColor": card,
+            "borderRadius": "12px",
+            "padding": "20px",
+            "border": "1px solid #2d3047"
+        },
+        children=[
+            html.H3(title, style={
+                "margin": "0 0 16px",
+                "fontSize": "14px",
+                "fontWeight": 600,
+                "color": gray
+            })
+        ] + content
+    )
+
+
+app = dash.Dash(__name__, title="Portfolio ETF")
+
+app.layout = html.Div(
+    style={"backgroundColor": bg, "minHeight": "100vh", "fontFamily": "Inter, sans-serif", "color": txt},
+    children=[
+
+        html.Div(
+            style={"padding": "24px 32px 12px", "borderBottom": "1px solid #2d3047"},
+            children=[
+                html.H1("ETF Portfolio", style={"margin": 0, "fontSize": "22px", "fontWeight": 700}),
+                html.P("Optimisation Markowitz", style={"margin": "4px 0 0", "color": gray, "fontSize": "13px"}),
+            ]
+        ),
+
+        html.Div(
+            style={"display": "flex", "gap": "16px", "padding": "16px 32px",
+                   "alignItems": "center", "flexWrap": "wrap"},
+            children=[
+                html.Div([
+                    html.Label("Méthode", style={"fontSize": "12px", "color": gray,
+                                                  "display": "block", "marginBottom": "4px"}),
+                    dcc.Dropdown(
+                        id="methode",
+                        options=[
+                            {"label": "Max Sharpe", "value": "sharpe"},
+                            {"label": "Min Volatilité", "value": "minvol"}
+                        ],
+                        value="sharpe",
+                        clearable=False,
+                        style={"width": "180px", "backgroundColor": card, "color": "#000"}
+                    )
+                ]),
+                html.Div([
+                    html.Label("Historique", style={"fontSize": "12px", "color": gray,
+                                                     "display": "block", "marginBottom": "4px"}),
+                    dcc.Dropdown(
+                        id="annees",
+                        options=[
+                            {"label": "1 an", "value": 1},
+                            {"label": "2 ans", "value": 2},
+                            {"label": "3 ans", "value": 3},
+                            {"label": "5 ans", "value": 5}
+                        ],
+                        value=3,
+                        clearable=False,
+                        style={"width": "120px", "backgroundColor": card, "color": "#000"}
+                    )
+                ]),
+                html.Div([
+                    html.Label("Seuil alerte (%)", style={"fontSize": "12px", "color": gray,
+                                                           "display": "block", "marginBottom": "4px"}),
+                    dcc.Input(
+                        id="seuil", type="number", value=5, min=1, max=30, step=1,
+                        style={"width": "75px", "backgroundColor": card, "border": "1px solid #2d3047",
+                               "color": txt, "padding": "6px 10px", "borderRadius": "6px"}
+                    )
+                ]),
+                html.Button(
+                    "↻ Charger", id="btn-charger", n_clicks=0,
+                    style={"marginTop": "18px", "backgroundColor": blue, "color": "#fff",
+                           "border": "none", "padding": "8px 20px", "borderRadius": "8px",
+                           "cursor": "pointer", "fontWeight": 600}
+                )
+            ]
+        ),
+
+        html.Div(id="alerte", style={"padding": "0 32px"}),
+        html.Div(id="statut", style={"padding": "0 32px"}),
+
+        html.Div(
+            style={"display": "grid", "gridTemplateColumns": "1fr 1fr", "gap": "16px", "padding": "0 32px 16px"},
+            children=[
+                make_card("Pondérations réelles vs optimales", [
+                    html.Div(id="inputs-poids"),
+                    html.Div(
+                        style={"marginTop": "14px"},
+                        children=[dcc.Graph(id="graph-barres", style={"height": "280px"})]
+                    )
+                ]),
+                make_card("Métriques", [html.Div(id="affichage-metriques")])
+            ]
+        ),
+
+        html.Div(
+            style={"display": "grid", "gridTemplateColumns": "1fr 1fr", "gap": "16px", "padding": "0 32px 16px"},
+            children=[
+                make_card("Frontière efficiente", [dcc.Graph(id="graph-front", style={"height": "320px"})]),
+                make_card("Performance cumulée", [dcc.Graph(id="graph-perf", style={"height": "320px"})])
+            ]
+        ),
+
+        html.Div(
+            style={"display": "grid", "gridTemplateColumns": "1fr 1fr", "gap": "16px", "padding": "0 32px 24px"},
+            children=[
+                make_card("Matrice de corrélation", [dcc.Graph(id="graph-corr", style={"height": "320px"})]),
+                make_card("Allocation optimale", [dcc.Graph(id="graph-pie", style={"height": "320px"})])
+            ]
+        ),
+
+        dcc.Store(id="store-ret"),
+        dcc.Store(id="store-opt-weights"),
+    ]
+)
+
+
+@app.callback(
+    Output("store-ret", "data"),
+    Output("store-opt-weights", "data"),
+    Output("statut", "children"),
+    Input("btn-charger", "n_clicks"),
+    State("methode", "value"),
+    State("annees", "value"),
+    prevent_initial_call=False
+)
+def load_data(n, methode, annees):
+    try:
+        ret = get_returns(tickers, annees)
+        opt_w = max_sharpe(ret) if methode == "sharpe" else min_vol(ret)
+        msg = html.Div(
+            f"✓ Données chargées · {len(ret)} jours · {datetime.now().strftime('%d/%m/%Y %H:%M')}",
+            style={"backgroundColor": "#0d2b1f", "color": green, "padding": "8px 16px",
+                   "borderRadius": "8px", "fontSize": "13px", "marginBottom": "12px"}
+        )
+        return ret.to_json(), opt_w, msg
+    except Exception as e:
+        err = html.Div(
+            f"⚠ Erreur : {e}",
+            style={"backgroundColor": "#2b0d1f", "color": red, "padding": "8px 16px",
+                   "borderRadius": "8px", "fontSize": "13px", "marginBottom": "12px"}
+        )
+        return None, None, err
+
+
+@app.callback(
+    Output("inputs-poids", "children"),
+    Input("store-opt-weights", "data")
+)
+def build_inputs(opt_w):
+    if not opt_w:
+        return html.P("Lance le chargement d'abord.", style={"color": gray})
+
+    rows = []
+    for t in tickers:
+        w = opt_w.get(t, 0)
+        rows.append(
+            html.Div(
+                style={"display": "flex", "alignItems": "center", "gap": "10px", "marginBottom": "10px"},
+                children=[
+                    html.Span(t, style={"width": "48px", "fontWeight": 700, "fontSize": "13px"}),
+                    html.Span(noms.get(t, t), style={"flex": 1, "fontSize": "12px", "color": gray}),
+                    html.Span(f"Opt: {w*100:.1f}%", style={"fontSize": "12px", "color": blue, "width": "90px"}),
+                    dcc.Input(
+                        id={"type": "input-poids", "ticker": t},
+                        type="number",
+                        value=round(w * 100, 1),
+                        min=0, max=100, step=0.1,
+                        style={"width": "75px", "backgroundColor": bg, "border": "1px solid #3d4060",
+                               "color": txt, "padding": "4px 8px", "borderRadius": "6px"}
+                    ),
+                    html.Span("%", style={"fontSize": "12px"})
+                ]
+            )
+        )
+    rows.append(
+        html.Button(
+            "Calculer", id="btn-calc", n_clicks=0,
+            style={"backgroundColor": green, "color": "#fff", "border": "none",
+                   "padding": "8px 18px", "borderRadius": "8px", "cursor": "pointer",
+                   "fontWeight": 600, "marginTop": "8px"}
+        )
+    )
+    return rows
+
+
+@app.callback(
+    Output("graph-barres", "figure"),
+    Output("alerte", "children"),
+    Input("btn-calc", "n_clicks"),
+    State({"type": "input-poids", "ticker": dash.ALL}, "value"),
+    State({"type": "input-poids", "ticker": dash.ALL}, "id"),
+    State("store-opt-weights", "data"),
+    State("seuil", "value"),
+    prevent_initial_call=True
+)
+def update_chart(n, vals, ids, opt_w, seuil):
+    if not opt_w:
+        return go.Figure(), []
+
+    thresh = (seuil or 5) / 100
+    real_w = get_real_weights(ids, vals, opt_w) if ids else opt_w
+
+    labels = [noms.get(t, t) for t in tickers]
+    fig = go.Figure()
+    fig.add_bar(
+        name="Optimal", x=labels,
+        y=[opt_w[t] * 100 for t in tickers],
+        marker_color=blue, opacity=0.85
+    )
+    fig.add_bar(
+        name="Réel", x=labels,
+        y=[real_w.get(t, 0) * 100 for t in tickers],
+        marker_color=green, opacity=0.85
+    )
+    fig.update_layout(
+        barmode="group",
+        paper_bgcolor=card, plot_bgcolor=card, font_color=txt,
+        margin=dict(l=10, r=10, t=10, b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        yaxis=dict(title="%", gridcolor="#2d3047"),
+        xaxis=dict(gridcolor="#2d3047")
+    )
+
+    drifts = []
+    for t in tickers:
+        diff = abs(real_w.get(t, 0) - opt_w[t])
+        if diff > thresh:
+            drifts.append((t, real_w.get(t, 0) * 100, opt_w[t] * 100, diff * 100))
+
+    if drifts:
+        lines = []
+        for t, rw, ow, d in drifts:
+            label = "surpondéré" if rw > ow else "sous-pondéré"
+            lines.append(html.Div(f"⚠  {t} — {label} de {d:.1f}pp  (réel {rw:.1f}% / optimal {ow:.1f}%)"))
+
+        banner = html.Div(
+            style={"backgroundColor": "#2b1a00", "border": f"1px solid {yellow}",
+                   "borderRadius": "10px", "padding": "14px 18px", "marginBottom": "12px"},
+            children=[
+                html.Div("🔔 Rééquilibrage recommandé",
+                         style={"fontWeight": 700, "color": yellow, "marginBottom": "8px", "fontSize": "14px"})
+            ] + lines
+        )
+    else:
+        banner = html.Div(
+            "✓ Portefeuille aligné",
+            style={"backgroundColor": "#0d2b1f", "color": green, "padding": "10px 18px",
+                   "borderRadius": "10px", "marginBottom": "12px", "fontSize": "13px"}
+        )
+
+    return fig, banner
+
+
+@app.callback(
+    Output("affichage-metriques", "children"),
+    Input("store-ret", "data"),
+    Input("store-opt-weights", "data"),
+    Input("btn-calc", "n_clicks"),
+    State({"type": "input-poids", "ticker": dash.ALL}, "value"),
+    State({"type": "input-poids", "ticker": dash.ALL}, "id"),
+    prevent_initial_call=True
+)
+def show_metrics(ret_json, opt_w, n, vals, ids):
+    if not ret_json or not opt_w:
+        return html.P("Chargement...", style={"color": gray})
+
+    ret = read_json(ret_json)
+    real_w = get_real_weights(ids, vals, opt_w) if ids else opt_w
+
+    r_opt, v_opt, s_opt = get_metrics(opt_w, ret)
+    r_real, v_real, s_real = get_metrics(real_w, ret)
+
+    def bloc(label, v_opt, v_real, fmt, higher_is_better=True):
+        delta = v_real - v_opt
+        color = green if (delta >= 0) == higher_is_better else red
+        return html.Div(
+            style={"backgroundColor": bg, "borderRadius": "8px",
+                   "padding": "14px 16px", "marginBottom": "10px"},
+            children=[
+                html.Div(label, style={"fontSize": "12px", "color": gray, "marginBottom": "6px"}),
+                html.Div(
+                    style={"display": "flex", "gap": "24px"},
+                    children=[
+                        html.Div([
+                            html.Div("Optimal", style={"fontSize": "11px", "color": gray}),
+                            html.Div(format(v_opt, fmt),
+                                     style={"fontSize": "20px", "fontWeight": 700, "color": blue})
+                        ]),
+                        html.Div([
+                            html.Div("Réel", style={"fontSize": "11px", "color": gray}),
+                            html.Div(format(v_real, fmt),
+                                     style={"fontSize": "20px", "fontWeight": 700, "color": color})
+                        ]),
+                        html.Div([
+                            html.Div("Écart", style={"fontSize": "11px", "color": gray}),
+                            html.Div(("+" if delta >= 0 else "") + format(delta, fmt),
+                                     style={"fontSize": "20px", "fontWeight": 700, "color": color})
+                        ])
+                    ]
+                )
+            ]
+        )
+
+    return [
+        bloc("Rendement annualisé", r_opt, r_real, ".1%", True),
+        bloc("Volatilité annualisée", v_opt, v_real, ".1%", False),
+        bloc("Sharpe", s_opt, s_real, ".2f", True),
+    ]
+
+
+@app.callback(
+    Output("graph-front", "figure"),
+    Input("store-ret", "data"),
+    Input("store-opt-weights", "data")
+)
+def show_frontier(ret_json, opt_w):
+    if not ret_json or not opt_w:
+        return go.Figure()
+
+    ret = read_json(ret_json)
+    vols, rets = efficient_frontier(ret)
+    r_opt, v_opt, _ = get_metrics(opt_w, ret)
+
+    mu = ret.mean() * 252
+    vol_ind = ret.std() * np.sqrt(252)
+
+    fig = go.Figure()
+    fig.add_scatter(x=vols, y=rets, mode="lines", name="Frontière",
+                    line=dict(color=blue, width=2))
+    fig.add_scatter(
+        x=[v_opt * 100], y=[r_opt * 100],
+        mode="markers", name="Optimal",
+        marker=dict(color=yellow, size=12, symbol="star")
+    )
+    for t in tickers:
+        if t in mu.index:
+            fig.add_scatter(
+                x=[vol_ind[t] * 100], y=[mu[t] * 100],
+                mode="markers+text", text=[t], textposition="top center",
+                marker=dict(size=7, color=gray),
+                showlegend=False,
+                textfont=dict(size=10, color=gray)
+            )
+    fig.update_layout(
+        paper_bgcolor=card, plot_bgcolor=card, font_color=txt,
+        margin=dict(l=10, r=10, t=10, b=10),
+        xaxis=dict(title="Vol (%)", gridcolor="#2d3047"),
+        yaxis=dict(title="Rendement (%)", gridcolor="#2d3047"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02)
+    )
+    return fig
+
+
+@app.callback(
+    Output("graph-perf", "figure"),
+    Input("store-ret", "data")
+)
+def show_perf(ret_json):
+    if not ret_json:
+        return go.Figure()
+
+    ret = read_json(ret_json)
+    pal = px.colors.qualitative.Plotly
+    fig = go.Figure()
+    for i, t in enumerate(tickers):
+        if t in ret.columns:
+            cum = (1 + ret[t]).cumprod() - 1
+            fig.add_scatter(
+                x=cum.index, y=cum * 100,
+                mode="lines", name=t,
+                line=dict(color=pal[i % len(pal)], width=1.5)
+            )
+    fig.update_layout(
+        paper_bgcolor=card, plot_bgcolor=card, font_color=txt,
+        margin=dict(l=10, r=10, t=10, b=10),
+        xaxis=dict(gridcolor="#2d3047"),
+        yaxis=dict(title="Perf cumulée (%)", gridcolor="#2d3047"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        hovermode="x unified"
+    )
+    return fig
+
+
+@app.callback(
+    Output("graph-corr", "figure"),
+    Input("store-ret", "data")
+)
+def show_corr(ret_json):
+    if not ret_json:
+        return go.Figure()
+
+    ret = read_json(ret_json)
+    corr = ret[tickers].corr()
+    labels = [noms.get(t, t) for t in tickers]
+    fig = go.Figure(go.Heatmap(
+        z=corr.values, x=labels, y=labels,
+        colorscale=[[0, "#1a3a5c"], [0.5, card], [1, "#5c1a1a"]],
+        zmin=-1, zmax=1,
+        text=np.round(corr.values, 2),
+        texttemplate="%{text}",
+        textfont=dict(size=11),
+        showscale=True,
+        colorbar=dict(tickfont=dict(color=txt))
+    ))
+    fig.update_layout(
+        paper_bgcolor=card, plot_bgcolor=card, font_color=txt,
+        margin=dict(l=10, r=10, t=10, b=10)
+    )
+    return fig
+
+
+@app.callback(
+    Output("graph-pie", "figure"),
+    Input("store-opt-weights", "data")
+)
+def show_pie(opt_w):
+    if not opt_w:
+        return go.Figure()
+
+    labels = [noms.get(t, t) for t in opt_w]
+    vals = list(opt_w.values())
+    fig = go.Figure(go.Pie(
+        labels=labels, values=vals, hole=0.4,
+        textinfo="label+percent",
+        marker=dict(colors=px.colors.qualitative.Plotly)
+    ))
+    fig.update_layout(
+        paper_bgcolor=card, font_color=txt,
+        margin=dict(l=10, r=10, t=10, b=10),
+        showlegend=False
+    )
+    return fig
+
+
+if __name__ == "__main__":
+    print("Dashboard dispo sur http://127.0.0.1:8050")
+    app.run(debug=True, port=8050)
